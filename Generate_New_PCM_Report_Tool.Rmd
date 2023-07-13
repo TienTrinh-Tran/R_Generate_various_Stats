@@ -1,0 +1,2822 @@
+---
+title: "Statistics from Auto PCM "
+author: "Competitive Analysis Team"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    theme: readable
+    css: style.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(readxlsb)
+library(openxlsx)
+library(kableExtra)
+library(DT)
+library(gridExtra)
+library(knitr)
+```
+
+```{r}
+mainDir = "T:/ACT_PID/Pcm_brm/Auto/New_Model/data/results/"
+mkt_share <- read_excel("I:/0.NEW/AUTO_Models/Market_Share.xlsx",sheet='Market_share')
+col_name_list <- read_excel("I:/0.NEW/AUTO_Models/Market_Share.xlsx",sheet='Col_Name_New_PCM')
+sit_list <- read_excel("I:/0.NEW/AUTO_Models/Market_Share.xlsx",sheet='Sit_Conversion_New_PCM')
+cov_order <- read_excel("I:/0.NEW/AUTO_Models/Market_Share.xlsx",sheet='cov_order_New_PCM')
+
+state <- "Indiana"
+st <- "IN"
+#for PA, remember to comment out step on line 158, check the mkt dict and also change the mkt name in Companies.csv file
+cc_date <- "04/01/2021"
+quarter <- "New_PCM_Official"
+iq_build <- "01/14/2022"
+archive <- "Y"
+folder <- "2022_01_14"
+
+#Original run
+company <- read_csv(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/IQ"), "Companies.csv"))
+prem <- read_csv(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/IQ"), "Premiums.csv"))
+pol <- read_csv(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/IQ"), "Policies.csv"))
+cc_prem <- read_xlsb(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/CC"), paste0("ST","_GW_Premiums_Impact_by_Coverage.xlsb")),sheet="Output")
+
+other_info <- read_csv(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/IQ"), "ProcessInfo.csv")) %>%
+  select(Date,`Build Creation Date`) %>%
+  mutate(IQ_Build=iq_build,RR_Quarter=quarter) %>%
+  rename(Run_date=Date) %>%
+  t()
+
+x <- paste0(mainDir,state,"/New_PCM/",folder,"/IQ")
+y <- paste0(mainDir,state,"/New_PCM/",folder,"/CC")
+dff <- data.frame(c('IQ_files_folder','CC_files_folder'),
+                  c(x,y))
+colnames(dff) <- c("About",'Info')
+info <- data.frame(other_info) %>% rownames_to_column()
+colnames(info) <- c("About",'Info')
+info_tbl <- bind_rows(info,dff)
+
+```
+
+<span style="color: blue;">**State:** `r state`</span>
+
+<span style="color: blue;">**Quarter:** `r quarter`</span>
+
+```{r eval=FALSE}
+company %>% head()
+prem %>% head()
+pol %>% head()
+```
+
+```{r}
+reduced <- prem %>% 
+  left_join(pol) %>% 
+  select(`Company Key`: `Policy No`,`Total Policy Premium`,`Total Vehicle Premium`,`Total Vehicle Liability Premium`,`Total Vehicle Physical Damage Premium`,`BI Premium`:`Rental Premium`) 
+
+IQ_col <- reduced %>% colnames() %>% data.frame()
+colnames(IQ_col) <- 'IQ'
+new_col_name <- IQ_col %>% left_join(col_name_list) 
+
+oldnames = colnames(reduced)
+newnames = new_col_name[,2]
+reduced <- reduced %>% rename_at(vars(oldnames), ~ newnames) 
+
+```
+
+```{r eval=FALSE}
+reduced %>% head()
+reduced[which.max(reduced$Policy_Prem),]
+```
+
+
+```{r}
+#replace IQ's CC's rate by Rater's rate
+dat <- bind_rows(
+  (reduced %>%
+  left_join(company, by="Company Key") %>%
+    # filter(`Company Key` != 2) %>% #comment this out if doesn't include CC on IQ
+  select(Company=`Company Name`,`Policy No`,Vehicle,Using_Policy_Prem,Using_Vehicle_Prem,BI:UMP,CMP:COL,TL:TE)), #IN,CO,IL,OR
+  # select(Company=`Company Name`,`Policy No`,Vehicle,Using_Policy_Prem,Using_Vehicle_Prem,BI:UIM,CMP:COL,TL:TE)),  #ID,PA 
+  # select(Company=`Company Name`,`Policy No`,Vehicle,Using_Policy_Prem,Using_Vehicle_Prem,BI:UMB,CMP:COL,TL:TE)),  #KS
+  (cc_prem %>% 
+     left_join(sit_list,by=c('Pol..'='Pol Num')) %>%
+     mutate(Company='California Casualty') %>%
+     group_by(`Pol..`) %>%
+     mutate(Using_Policy_Prem=sum(TOTAL)) %>%
+     ungroup() %>% 
+     select(Company, `Policy No`=`Pol..`,Vehicle=`Vehicle.Index..`,Using_Policy_Prem,Using_Vehicle_Prem=TOTAL,BI:TE)))
+
+#add BI & PD
+dat <- dat %>% mutate(`BI+PD`=BI+PD)
+```
+
+```{r eval=FALSE}
+dat %>% head(30)
+dat %>% tail(30)
+```
+
+
+```{r}
+
+  st_mkt_share <- mkt_share %>% filter(State==st,Version=='x') %>% select(-Version) %>% 
+   mutate(mkt_wt=case_when(Company == 'CCG'~1,
+                           TRUE~(`Company Market Share`/sum(`Company Market Share`[Company != 'CCG'])))) %>% 
+  arrange(desc(mkt_wt)) %>% #might need to remove this for PA
+  # arrange(desc(mkt_wt)) %>%   
+  mutate(mkt_wt=case_when(Company == 'CCG'~0,
+                          TRUE~mkt_wt)) %>% 
+  left_join(company) 
+
+# col_order <- st_mkt_share$Company
+
+# st_mkt_share[1,"Base Rate Effective Date"] <- cc_date
+# st_mkt_share[1,"Filing Effective Date"] <- cc_date
+st_mkt_share[1,"Premium Effective Date"] <- cc_date
+st_mkt_share <- st_mkt_share %>% mutate(Rank=case_when(`Company Name` == 'California Casualty'~0,
+                        TRUE~`Group Rank`))
+ 
+```
+
+```{r eval=FALSE}
+st_mkt_share
+```
+
+
+```{r}
+#Overall Relativity
+pcm_overall <- dat %>% 
+  select(Company:Using_Policy_Prem) %>%
+  filter(Vehicle==1) %>%
+  mutate(Cov="Using_Policy_Prem") %>% 
+  group_by(Company,Cov) %>% 
+  summarise(avg_prem=mean(Using_Policy_Prem)) %>% 
+  ungroup() %>% 
+  mutate(Rel=avg_prem/avg_prem[Company=='California Casualty']*100) %>% 
+  left_join((st_mkt_share %>% select(`Company Name`,mkt_wt,`Group Rank`)),by=c('Company'='Company Name')) 
+# %>% --Added Rank column in the st_mkt_share in earlier step to make it easy to join data later
+#   mutate(Rank=case_when(Company == 'California Casualty'~0,
+#                         TRUE~`Group Rank`)) 
+
+pcm_overall_combined <- pcm_overall %>% 
+  group_by(Cov) %>%
+  summarise(COMBINED=sum(Rel*mkt_wt,na.rm=TRUE))
+
+```
+
+```{r eval=FALSE}
+pcm_overall %>% head(10)
+pcm_overall_combined %>% head(10)
+```
+
+```{r}
+pcm_overall_by_veh <- dat %>% 
+  select(Company:Vehicle,Using_Vehicle_Prem) %>%
+  mutate(Cov="Vehicle_Prem") %>% 
+  group_by(Company,Cov) %>% 
+  summarise(avg_prem=mean(Using_Vehicle_Prem)) %>% 
+  ungroup() %>% 
+  mutate(Rel=avg_prem/avg_prem[Company=='California Casualty']*100) %>% 
+  left_join((st_mkt_share %>% select(`Company Name`,mkt_wt,`Group Rank`)),by=c('Company'='Company Name')) 
+```
+
+
+```{r}
+#By Coverage Relativity
+pcm_cov <- dat %>% 
+  gather(key="Cov",value="Prem",Using_Vehicle_Prem:`BI+PD`) %>% 
+  group_by(Company,Cov) %>% 
+  summarise(avg_prem=mean(Prem)) %>%
+  # summarise(avg_prem=mean(Prem[Prem !=0])) %>%
+  mutate(avg_prem = replace_na(avg_prem, 0)) %>%
+  ungroup() %>% 
+  mutate(Rel=avg_prem/avg_prem[Company=='California Casualty']*100) %>% 
+  left_join((st_mkt_share %>% select(`Company Name`,mkt_wt,`Group Rank`)),by=c('Company'='Company Name')) %>% 
+  mutate(Rank=case_when(Company == 'California Casualty'~0,
+                        TRUE~`Group Rank`)) 
+
+pcm_cov_combined <- pcm_cov %>% 
+  group_by(Cov) %>% 
+  summarise(COMBINED=sum(Rel*mkt_wt,na.rm=TRUE))
+
+```
+
+```{r eval=FALSE}
+pcm_cov 
+pcm_cov_combined 
+#write_csv(pcm_cov,"test.csv")
+```
+
+```{r}
+#Average Premiums
+pcm_avg_wide_policy <- pcm_overall %>% 
+  mutate(Rank=case_when(Company == 'California Casualty'~0,
+                        TRUE~`Group Rank`)) %>% 
+  arrange(Rank) %>% 
+  pivot_wider(names_from=Company,values_from=avg_prem,-c(mkt_wt,`Group Rank`,Rank,Rel))
+
+pcm_avg_long <- dat %>% 
+  gather(key="Cov",value="Prem",Using_Vehicle_Prem:`BI+PD`) %>% 
+  # filter(Company=='State Farm Auto (SFM)') %>% 
+  # mutate(Prem_wt=ZIP_Weight*Prem) %>% 
+  group_by(Company,Cov) %>% 
+  summarise(avg_prem=mean(Prem,na.rm = TRUE)) %>%
+  # summarise(avg_prem=mean(Prem[Prem!=0],na.rm = TRUE)) %>%
+  mutate(avg_prem = replace_na(avg_prem, 0)) %>%  
+  ungroup() %>% 
+  left_join((st_mkt_share %>% select(`Company Name`,mkt_wt,`Group Rank`)),by=c('Company'='Company Name')) %>% 
+  mutate(Rank=case_when(Company == 'California Casualty'~0,
+                        TRUE~`Group Rank`)) 
+
+##Use this if we should use the policy prem just once, to get correct weight since multiple vehicles = policy prem are repeated multiple times
+# pcm_avg_long <- bind_rows(
+#   (pcm_overall %>% select(Company:avg_prem)),
+#   (pcm_cov %>% select(Company:avg_prem))
+# )
+# library(scales)
+pcm_avg_wide <- pcm_avg_wide_policy %>%
+  bind_rows(pcm_avg_long %>% arrange(Rank) %>% 
+  pivot_wider(names_from=Company,values_from=avg_prem,-c(mkt_wt,`Group Rank`,Rank)) %>% 
+  select(Cov,`California Casualty`,everything()) %>% 
+  left_join(cov_order,by=c("Cov"="Col_name")) %>% 
+    arrange(Order) %>% 
+  select(-Order)) #%>% mutate_if(is.numeric,funs(number(., big.mark = ",", accuracy = 1)))
+
+
+# pcm_avg_wide
+```
+
+```{r}
+
+pcm <- bind_rows(pcm_overall,pcm_cov) %>% arrange(Rank) %>% 
+  pivot_wider(names_from=Company,values_from=Rel,-c(avg_prem,mkt_wt,`Group Rank`,Rank)) %>% 
+  select(Cov,`California Casualty`,everything()) %>% 
+  left_join(cov_order,by=c("Cov"="Col_name")) %>% 
+    arrange(Order) 
+
+m <- data.frame(rbind(c("Effective Date",st_mkt_share$`Premium Effective Date`),
+  c("Market Share",as.numeric(as.character(st_mkt_share$`Company Market Share`))),
+  c("Rank",as.numeric(as.character(st_mkt_share$`Group Rank`)))
+                      ))
+  names(m) <- c("Cov",names(pcm)[2:(length(names(pcm))-1)])
+
+  combined <- rbind(c(NA,NA),c(NA,NA),c(NA,NA),
+                    (rbind(pcm_cov_combined,pcm_overall_combined) %>%
+                       left_join(cov_order,by=c("Cov"="Col_name")) %>% 
+                       arrange(Order))) 
+
+#Concate the 2 data frames
+    pcm <- bind_cols(bind_rows(m,pcm %>% mutate_if(is.double,as.factor)),
+                     combined[,2]) %>% 
+    filter(!COMBINED %in% c('Inf',0)) %>% 
+    select(-Order) %>% 
+    rename('st'="Cov")
+  
+  names(pcm) <- c(st,names(pcm)[2:(length(names(pcm)))])
+
+```
+
+```{r eval=FALSE}
+pcm
+m
+```
+
+
+```{r}
+#By Situation straight average Premium & relativity - long
+by_sit_straight_avg_rel_long <- dat %>% 
+  filter(Vehicle==1) %>% 
+  mutate(Policy_Prem=round(`Using_Policy_Prem`,0)) %>% 
+  select(Company, `Policy No`, Policy_Prem)  %>% 
+  group_by(Company,`Policy No`) %>% 
+  summarise(avg_prem=sum(Policy_Prem)) %>%   
+  ungroup() %>% 
+  # filter(`Policy No` %in% c('000001-1055010','000002-1107365')) %>%
+  group_by(`Policy No`) %>% 
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  left_join((st_mkt_share %>% select(`Company Name`,mkt_wt,`Group Rank`)),by=c('Company'='Company Name')) %>% 
+  mutate(Rank=case_when(Company == 'California Casualty'~0,
+                        TRUE~`Group Rank`)) %>% 
+  arrange(`Policy No`,Rank)
+
+by_sit_straight_avg_rel_long_combined <- by_sit_straight_avg_rel_long %>% 
+  group_by(`Policy No`) %>%
+  mutate(COMBINED=round(sum(Rel*mkt_wt,na.rm=TRUE),2)) %>% 
+  select(`Policy No`,COMBINED) %>% unique()
+
+#By Situation straight average Premium - wide
+by_sit_straight_avg_wide <- by_sit_straight_avg_rel_long %>% 
+  select(Company:avg_prem) %>% 
+  pivot_wider(names_from=Company,values_from=avg_prem)
+
+#By Situation Rel - wide  
+by_sit_rel_wide <- by_sit_straight_avg_rel_long %>% 
+  select(Company,`Policy No`,Rel) %>% 
+  pivot_wider(names_from=Company,values_from=Rel) %>% 
+  left_join(by_sit_straight_avg_rel_long_combined) 
+  
+
+```
+
+```{r eval=FALSE}
+by_sit_straight_avg_rel_long #%>% filter(`Policy No`%in% c('000001-1055010','000002-1107365'))
+# by_sit_straight_avg_rel_long %>% tail(100)
+by_sit_straight_avg_wide
+by_sit_rel_wide
+```
+
+
+```{r}
+### <span style="color: blue;">Household</span>  {.tabset .tabset-fade}
+#Create overall Rel plot
+avg_prem_plot <- by_sit_straight_avg_rel_long %>% 
+  left_join(st_mkt_share %>% select(`Company Name`,Company),by=c("Company"="Company Name")) %>% 
+  rename(Competitor=`Company.y`) %>% 
+  ggplot(aes(x=avg_prem,col=Competitor)) + 
+  geom_histogram() +
+  theme_bw() + facet_wrap(~Competitor) +
+  theme(legend.position = "none") +
+  xlab("Policy Premium")
+
+# #Create overall Rel plot
+avg_rel_plot <- by_sit_straight_avg_rel_long %>%
+  # mutate(Relativity=round(Policy_Prem/Policy_Prem[Company=="California Casualty"]*100,1)) %>%
+  left_join(st_mkt_share %>% select(`Company Name`,Company),by=c("Company"="Company Name")) %>%
+  rename(Competitor=`Company.y`) %>% 
+  filter(Competitor!="CCG") %>%
+  select(`Policy No`,Rel,Competitor) %>% 
+  bind_rows(by_sit_straight_avg_rel_long_combined %>% 
+              mutate(Competitor='COMBINED') %>% 
+              select(`Policy No`,Rel=COMBINED,Competitor)) %>% 
+  # mutate_at(Company.y)
+  ggplot(aes(x=Rel,col=Competitor)) +
+  geom_histogram() +
+  # geom_vline(aes(xintercept = mean(Relativity)),col='red',size=2) +
+  theme_bw() + facet_wrap(~Competitor) +
+  theme(legend.position = "none") +
+  xlab("Policy Relativity")
+
+avg_rel_plot1 <- by_sit_straight_avg_rel_long %>%  
+  # mutate(Relativity=round(Policy_Prem/Policy_Prem[Company=="California Casualty"]*100,1)) %>%
+  left_join(st_mkt_share %>% select(`Company Name`,Company),by=c("Company"="Company Name")) %>%
+  rename(Competitor=`Company.y`) %>% 
+  filter(Competitor!="CCG") %>%
+  select(`Policy No`,Rel,Competitor) %>% 
+  bind_rows(by_sit_straight_avg_rel_long_combined %>% 
+              mutate(Competitor='COMBINED') %>% 
+              select(`Policy No`,Rel=COMBINED,Competitor)) %>%  
+  mutate(Competitor = fct_reorder(Competitor, Rel, .fun='mean' )) %>%
+  ggplot(aes(x=Competitor,y=Rel,col=Competitor)) +
+  geom_violin(draw_quantiles = 0.5) +
+  # stat_summary(fun.y=mean, colour="red", geom="point", shape=20, size=4, show_guide = FALSE) +
+  # stat_summary(fun.data=mean_sdl, mult=1,geom="pointrange", color="red") +
+  geom_boxplot(width=0.1) +
+  # geom_vline(aes(xintercept = 100),col='red',size=1) +
+  theme_bw() + 
+  # facet_wrap(~Competitor) +
+  theme(legend.position = "none",axis.title.y = element_blank()) +
+  coord_flip()
+
+```
+
+```{r eval=FALSE}
+grid_plot <- grid.arrange(avg_rel_plot1, avg_rel_plot, avg_prem_plot, widths = c(2, 3),
+  layout_matrix = rbind(c(1, 2),
+                        c(1, 3)))
+```
+
+
+```{r eval=FALSE}
+#Create Excel report
+pcm_header <- pcm[1,]
+pcm_num <- pcm[-1,]
+
+pcm_num <- pcm_num %>% mutate_if(is.factor, as.character)
+pcm_num <- pcm_num %>% mutate_at(.vars = vars(2:8),funs(as.numeric))
+
+bold_wrap <- createStyle(
+  # fontSize = 12, fontName = "Arial",
+  textDecoration = "bold", halign = "center", wrapText = TRUE)
+
+
+# library(openxlsx)
+wb <- createWorkbook()
+
+negStyle <- createStyle(fontColour = "red") #,textDecoration = "bold"
+posStyle <- createStyle(fontColour = "blue") # - green #008000
+
+# negStyle <- createStyle(fontColour = "#9C0006", bgFill = "#FFC7CE")
+# posStyle <- createStyle(fontColour = "#006100", bgFill = "#C6EFCE")
+
+addWorksheet(wb, "Rel")
+writeData(wb, "Rel", pcm_header)
+writeData(wb, "Rel", pcm_num[1:3,],startRow = 3, colNames = FALSE)
+setColWidths(wb, "Rel", cols = 1:ncol(pcm), widths = 15)
+addStyle(wb, "Rel", style=bold_wrap, rows = 1, cols = 2:ncol(pcm), gridExpand = TRUE)
+addStyle(wb, "Rel", createStyle(fontColour = "#ffc000"), rows = 2, cols = 2:ncol(pcm))
+addStyle(wb, "Rel", createStyle(fontColour = "#FF00FF"), rows = 3, cols = 2:ncol(pcm), gridExpand = TRUE) #,bgFill = "#DCDCDC"
+addStyle(wb, "Rel", createStyle(fontColour = "#e26b0a"), rows = 4, cols = 2:ncol(pcm), gridExpand = TRUE)
+# addStyle(wb, "Rel", createStyle(bgFill = "grey"), rows = 2:4, cols = 1:ncol(pcm), gridExpand = TRUE)
+conditionalFormatting(wb,"Rel",rows = 5,cols=2:ncol(pcm),rule = "<100",type = "expression",style=negStyle)
+conditionalFormatting(wb,"Rel",rows = 5,cols=2:ncol(pcm),rule = ">100",style=posStyle)
+print(avg_rel_plot1)
+insertPlot(wb, "Rel",startRow = 8, startCol = 2,width = 5, height = 7, fileType = "png", units = "in")
+print(avg_rel_plot)
+insertPlot(wb, "Rel",startRow = 8, startCol = 7,width = 5, height = 3.5, fileType = "png", units = "in")
+print(avg_prem_plot)
+insertPlot(wb, "Rel",startRow = 22, startCol = 7,width = 5, height = 3.5, fileType = "png", units = "in")
+# print(grid_plot)
+# insertPlot(wb, "Rel",startRow = 8, startCol = 2,width = 5, height = 7, fileType = "png", units = "in")
+
+addWorksheet(wb, "Rel_by_cov")
+writeData(wb, "Rel_by_cov", pcm_header)
+writeData(wb, "Rel_by_cov", pcm_num %>% filter_at(1, all_vars(. !="Policy_Prem")),startRow = 3,colNames = FALSE)
+setColWidths(wb, "Rel_by_cov", cols = 1:ncol(pcm), widths = 15)
+addStyle(wb, "Rel_by_cov", style=bold_wrap, rows = 1, cols = 2:ncol(pcm), gridExpand = TRUE)
+# addStyle(wb, "Rel_by_cov", createStyle(bgFill = "lightgrey"), rows = 2:4, cols = 1:ncol(pcm), gridExpand = TRUE)
+addStyle(wb, "Rel_by_cov", createStyle(fontColour = "#ffc000"), rows = 2, cols = 2:ncol(pcm), gridExpand = TRUE)
+addStyle(wb, "Rel_by_cov", createStyle(fontColour = "#FF00FF"), rows = 3, cols = 2:ncol(pcm), gridExpand = TRUE)
+addStyle(wb, "Rel_by_cov", createStyle(fontColour = "#e26b0a"), rows = 4, cols = 2:ncol(pcm), gridExpand = TRUE)
+
+addWorksheet(wb, "Average_Prem")
+writeData(wb,"Average_Prem", pcm_avg_wide)
+setColWidths(wb, "Average_Prem", cols = 1:ncol(by_sit_straight_avg_wide), widths = 15)
+addStyle(wb, "Average_Prem", style=bold_wrap, rows = 1, cols = 2:ncol(by_sit_straight_avg_wide), gridExpand = TRUE)
+
+#Additional sheet for Factor analysis
+addWorksheet(wb, "Average_Prem_Manual")
+writeData(wb,"Average_Prem_Manual", pcm_avg_wide)
+writeData(wb,"Average_Prem_Manual",'IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),"<>0",Data!$C:$C,1,Data!$AA:$AA,"<>1"),0)',startCol = 13, startRow = 2)
+writeData(wb,"Average_Prem_Manual",'=IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),"<>0",Data!$C:$C,1,Data!$AA:$AA,"<>1"),0)',startCol = 14, startRow = 2)
+writeData(wb,"Average_Prem_Manual",'IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,Data!$AA:$AA,"<>1"),0)',startCol = 13, startRow = 3)
+writeData(wb,"Average_Prem_Manual",'=IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,Data!$AA:$AA,"<>1"),0)',startCol = 14, startRow = 3)
+writeData(wb,"Average_Prem_Manual",'IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),"<>0",Data!$C:$C,1,Data!$AA:$AA,"<>1"),0)',startCol = 25, startRow = 2)
+writeData(wb,"Average_Prem_Manual",'=IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A2,Data!$1:$1,0)),"<>0",Data!$C:$C,1,Data!$AA:$AA,"<>1"),0)',startCol = 26, startRow = 2)
+writeData(wb,"Average_Prem_Manual",'IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),"<>0",Data!$AA:$AA,"<>1"),0)',startCol = 25, startRow = 3)
+writeData(wb,"Average_Prem_Manual",'=IFERROR(AVERAGEIFS(INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),Data!$A:$A,Average_Prem_manual!B$1,INDEX(Data!$A:$X,,MATCH($A3,Data!$1:$1,0)),"<>0",Data!$AA:$AA,"<>1"),0)',startCol = 26, startRow = 3)
+writeData(wb,"Average_Prem_Manual",'=C2/$B2*100',startCol = 3, startRow = 20)
+writeData(wb,"Average_Prem_Manual",'For Adjustment column -->',startCol = 13, startRow = 18)
+writeData(wb,"Average_Prem_Manual",'=N2-B2',startCol = 14, startRow = 20)
+writeData(wb,"Average_Prem_Manual",'Including $0 Premium',startCol = 14, startRow = 1)
+writeData(wb,"Average_Prem_Manual",'Excluding $0 Premium',startCol = 26, startRow = 1)
+
+setColWidths(wb, "Average_Prem_Manual", cols = 1:ncol(by_sit_straight_avg_wide), widths = 15)
+addStyle(wb, "Average_Prem_Manual", style=bold_wrap, rows = 1, cols = 2:ncol(by_sit_straight_avg_wide), gridExpand = TRUE)
+
+conditionalFormatting(wb,"Rel_by_cov",rows = 5:(nrow(pcm)+1),cols=2:ncol(pcm),rule = "<100",type = "expression",style=negStyle)
+conditionalFormatting(wb,"Rel_by_cov",rows = 5:(nrow(pcm)+1),cols=2:ncol(pcm),rule = ">100",style=posStyle)
+
+# addWorksheet(wb, "Rel_by_Pol")
+# writeData(wb, "Rel_by_Pol", by_sit_rel_wide)
+# setColWidths(wb, "Rel_by_Pol", cols = 1:ncol(by_sit_rel_wide), widths = 15)
+# addStyle(wb, "Rel_by_Pol", style=bold_wrap, rows = 1, cols = 2:ncol(by_sit_rel_wide), gridExpand = TRUE)
+# conditionalFormatting(wb,"Rel_by_Pol",
+#                       rows = 2:(nrow(by_sit_rel_wide)+1),
+#                       cols=2:ncol(by_sit_rel_wide),
+#                       rule = "<100",type = "expression",style=negStyle)
+# conditionalFormatting(wb,"Rel_by_Pol",
+#                       rows = 2:(nrow(by_sit_rel_wide)+1),
+#                       cols=2:ncol(by_sit_rel_wide),rule = ">100",style=posStyle)
+# 
+# addWorksheet(wb, "Prem_by_Pol")
+# writeData(wb, "Prem_by_Pol", by_sit_straight_avg_wide)
+# setColWidths(wb, "Prem_by_Pol", cols = 1:ncol(by_sit_straight_avg_wide), widths = 15)
+# addStyle(wb, "Prem_by_Pol", style=bold_wrap, rows = 1, cols = 2:ncol(by_sit_straight_avg_wide), gridExpand = TRUE)
+
+addWorksheet(wb, "Market_Info")
+writeData(wb, "Market_Info", st_mkt_share)
+writeData(wb, "Market_Info", info_tbl,startRow = 15,rowNames=FALSE,colNames = FALSE)
+freezePane(wb, "Market_Info",  firstActiveRow = 2, firstActiveCol = 10)
+addStyle(wb, "Market_Info", style=bold_wrap, rows = 1, cols = 1:ncol(st_mkt_share), gridExpand = TRUE)
+
+if (st!="CA") {
+addWorksheet(wb, "Data")
+writeData(wb, "Data", dat)
+setColWidths(wb, "Data", cols = 1, widths = "auto")
+addFilter(wb, "Data", row = 1, cols = 1:ncol(dat))
+freezePane(wb, "Data" ,  firstActiveRow = 2,  firstActiveCol = 5)
+}
+
+saveWorkbook(wb,paste0(st,"_AUTO_New_PCM.xlsx"),overwrite = TRUE)
+
+```
+
+```{r include=FALSE}
+### BREAK POINT BETWEEN Excel Report & HTML
+```
+
+
+# Overall Relativity
+
+<div class = "blue">
+## By Policy
+</div> 
+
+
+### {.tabset .tabset-fade}
+
+#### Relativity
+
+```{r}
+
+top3 <- pcm %>% head(3) %>% mutate_if(is.double,as.factor)
+row_4 <- pcm %>% slice(4:4) 
+  i <- c(2:dim(row_4)[2])    
+  row_4[ , i] <- apply(row_4[ , i], 2,            # Specify own function within apply
+                    function(x) as.numeric(as.character(x))) 
+row_4 <- row_4 %>% 
+  mutate(across(is.numeric, ~ round(., 1))) %>% 
+  mutate_if(is.numeric,as.factor)
+
+# top3
+# row_4
+
+bind_rows(top3,row_4) %>%
+  kable(format = "html", escape = F) %>% 
+  kable_styling("striped", full_width = F) 
+#   scroll_box(width = "100%", height = "500px")
+```
+
+
+
+
+
+
+
+#### Relativy-Graph1
+
+```{r}
+avg_rel_plot1 + ylab("Relativity") + theme(axis.title.y = element_blank()) 
+```
+
+
+#### Relativity-Graph2
+
+```{r}
+avg_rel_plot + theme(legend.position = "none")
+```
+
+
+#### Avg Prem-Graph
+
+```{r}
+avg_prem_plot + theme(legend.position = "none")
+```
+
+
+
+###
+
+<div class = "blue">
+## By Coverage
+</div>
+
+### {.tabset .tabset-fade}
+
+#### Relativity
+
+```{r}
+# pcm %>% slice_tail(n=nrow(pcm)-4) %>% as.numeric() %>% 
+#   mutate(across(is.numeric, ~ round(., 0))) %>% 
+#   kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+  
+  k <- pcm %>% slice_tail(n=nrow(pcm)-4) 
+  i <- c(2:dim(k)[2])    
+  k[ , i] <- apply(k[ , i], 2,            # Specify own function within apply
+                    function(x) as.numeric(as.character(x)))
+  k %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  kable(format = "html", escape = F) %>%
+  kable_styling("striped", full_width = F) %>%
+  scroll_box(width = "100%", height = "500px")
+  
+```
+
+#### Avg Premium
+
+```{r}
+pcm_avg_wide %>% 
+  # filter(Cov != "Policy_Prem") %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+```{r}
+# Risk <-read_xlsx('T:/ACT_PID/Pcm_brm/Auto/New_Model/z.IQ_CC_Mapping/Situations/PA_PCM_CC_IQ_Sit.xlsx', sheet = 'Situations',range = "A1:EG20000")
+# Risk <- read_xlsx('I:/0.NEW/PCM_Report/Situations/IN_PCM_CC_IQ_Sit.xlsx', sheet = 'Situations',range = "A1:EN20000")
+Risk <- read_csv(file.path(paste0(mainDir,state,"/New_PCM/",folder,"/CC"), "IN_New_PCM_Input_CC.csv"))
+```
+
+```{r eval=FALSE}
+Risk %>% head(10)
+names(Risk)
+```
+
+# Relativity by Categories
+
+<div class = "blue">
+## Liability Limit-Vehicle Age
+</div>
+
+
+```{r}
+Limit_dat <- Risk %>% 
+  # filter(colu != '') %>% 
+  select(`Policy No`,`Veh_lookup`,c(BI:UIM),UMP,CMP,COL) %>% 
+  separate(Veh_lookup,into = c('Pol','Unit'), sep = "-") %>% 
+  filter(!is.na(Unit)) %>% 
+  mutate(Unit = as.numeric(Unit)) %>% 
+  # unique() %>% 
+  left_join((dat %>%  ungroup() %>% select(Company,`Policy No`,Vehicle,c(BI:UIM),UMP,CMP,COL)),by=c('Policy No'='Policy No','Unit'='Vehicle'))  
+
+```
+
+```{r}
+MY_dat <- Risk %>% 
+  # filter(colu != '') %>% 
+  select(`Policy No`,`Veh_lookup`,`Model Year`,`Commute Mileage`,`Annual Mileage`) %>% 
+  mutate(Veh_Age=case_when(`Model Year`>=2020~2,
+                           `Model Year`<=2000~22,
+                           TRUE~(2022-`Model Year`))) %>% #, 
+         # MY=case_when(`Model Year`=2020~2020,
+         #                                       `Model Year`=2000~2000,
+         #                                       TRUE~`Model Year`)) %>% 
+  
+  separate(Veh_lookup,into = c('Pol','Unit'), sep = "-") %>% 
+  filter(!is.na(Unit)) %>% 
+  mutate(Unit = as.numeric(Unit)) %>% 
+  # unique() %>% 
+  left_join((dat %>%  ungroup() %>% select(Company,`Policy No`,Vehicle,c(BI:UIM),CMP,COL,'BI+PD')),by=c('Policy No'='Policy No','Unit'='Vehicle'))  
+```
+
+### <span style="color: blue;">Bodily Injury</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_limit_bi <- Limit_dat %>% 
+  select(BI=BI.x,Company,Avg_veh_prem=BI.y) %>% 
+  group_by(BI,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[BI=='100/300'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_bi_prem_wide <- by_limit_bi %>% 
+  arrange(BI,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_bi_rel_wide <- by_limit_bi %>% 
+  arrange(BI,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_bi_factor_wide <-by_limit_bi %>% 
+  arrange(BI,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+BI_order <- c("15/30","25/50","30/60","50/100","100/300","250/500","300/500","500/500","500/1M","1M/1M")
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(BI.x,levels=rev(BI_order)))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_bi_prem_wide %>% 
+  arrange(factor(BI, levels = BI_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_bi_rel_wide %>%   
+  arrange(factor(BI, levels = BI_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_bi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',BI != 'All_HH') %>%
+  ggplot(aes(x=factor(BI,levels=rev(BI_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[BI = Limit\_Type]}{Average\ Premium[BI = 100/300]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_bi_factor_wide %>%
+  arrange(factor(BI, levels = BI_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_bi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(BI != 'All_HH') %>% 
+  ggplot(aes(x=factor(BI,levels=rev(BI_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank())
+```
+
+### <span style="color: blue;">Property Damage</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_limit_pd <- Limit_dat %>% 
+  select(PD=PD.x,Company,Avg_veh_prem=PD.y) %>% 
+  group_by(PD,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[PD=='50'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_pd_prem_wide <- by_limit_pd %>% 
+  arrange(PD,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_pd_rel_wide <- by_limit_pd %>% 
+  arrange(PD,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_pd_factor_wide <-by_limit_pd %>% 
+  arrange(PD,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+PD_order <- c('5','10','15','20','25','50','100','200','300')
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(PD.x,levels=rev(PD_order)))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 900, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_pd_prem_wide %>% 
+  arrange(factor(PD,levels = PD_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_pd_rel_wide %>%
+  arrange(factor(PD,levels = PD_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_pd %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',PD != 'All_HH') %>%
+  ggplot(aes(x=factor(PD,levels = rev(PD_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[PD = Limit\_Type]}{Average\ Premium[PD = 50]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_pd_factor_wide %>%
+    arrange(factor(PD,levels = PD_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_pd %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(PD != 'All_HH') %>% 
+  ggplot(aes(x=factor(PD,levels = rev(PD_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none', axis.title.y=element_blank())
+```
+
+### <span style="color: blue;">Medical</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_limit_med <- Limit_dat %>% 
+  filter(MP.x != '') %>% 
+  select(MP=MP.x,Company,Avg_veh_prem=MP.y) %>% 
+  group_by(MP,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[MP=='5000'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_med_prem_wide <- by_limit_med %>% 
+  arrange(MP,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_med_rel_wide <- by_limit_med %>% 
+  arrange(MP,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_med_factor_wide <-by_limit_med %>% 
+  arrange(MP,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+MP_order <- c('1000','2000','5000','10000','25000')
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(MP.x,levels=rev(MP_order)))) +
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 1100, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_med_prem_wide %>% 
+  filter(MP != '') %>% 
+  arrange(factor(MP,levels = MP_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_med_rel_wide %>%
+  filter(MP != '') %>%   
+  arrange(factor(MP,levels = MP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_med %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',MP != '') %>%
+  ggplot(aes(x=factor(MP,levels = rev(MP_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[MP = Limit\_Type]}{Average\ Premium[MP = 5000]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_med_factor_wide %>%
+    arrange(factor(MP,levels = MP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_med %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(MP != '') %>% 
+  ggplot(aes(x=factor(MP,levels = rev(MP_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none', axis.title.y=element_blank())
+```
+
+
+
+### <span style="color: blue;">Uninsured Motorist BI</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+by_limit_umbi <- Limit_dat %>% 
+  filter(UM != '') %>% 
+  select(UM=UM,Company,Avg_veh_prem=UMB) %>% 
+  group_by(UM,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[UM=='100/300'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_umbi_prem_wide <- by_limit_umbi %>% 
+  arrange(UM,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_umbi_rel_wide <- by_limit_umbi %>% 
+  arrange(UM,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_umbi_factor_wide <-by_limit_umbi %>% 
+  arrange(UM,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+UM_order <- c("15/30","25/50","30/60","50/100","100/300","250/500","300/500","500/500","500/1M","1M/1M")
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(UM,levels=rev(UM_order)))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 900, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_umbi_prem_wide %>% 
+  arrange(factor(UM, levels = UM_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_umbi_rel_wide %>%   
+  arrange(factor(UM, levels = UM_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_umbi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',UM != 'All_HH') %>%
+  ggplot(aes(x=factor(UM,levels=rev(UM_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[UM = Limit\_Type]}{Average\ Premium[UM = 100/300]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_umbi_factor_wide %>%
+  arrange(factor(UM, levels = UM_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_umbi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(UM != 'All_HH') %>% 
+  ggplot(aes(x=factor(UM,levels=rev(UM_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank())
+```
+
+### <span style="color: blue;">Underinsured Motorist BI</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+by_limit_uimbi <- Limit_dat %>% 
+  filter(UIM.x != '') %>% 
+  select(UIM=UIM.x,Company,Avg_veh_prem=UIM.y) %>% 
+  group_by(UIM,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[UIM=='100/300'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_uimbi_prem_wide <- by_limit_uimbi %>% 
+  arrange(UIM,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_uimbi_rel_wide <- by_limit_uimbi %>% 
+  arrange(UIM,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_uimbi_factor_wide <-by_limit_uimbi %>% 
+  arrange(UIM,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+UIM_order <- c("15/30","25/50","50/50","30/60","50/100","100/300","250/500","300/500","500/500","500/1M","1M/1M")
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(UIM.x,levels=rev(UIM_order)))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 900, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_uimbi_prem_wide %>% 
+  arrange(factor(UIM, levels = UIM_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_uimbi_rel_wide %>%   
+  arrange(factor(UIM, levels = UIM_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_uimbi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',UIM != 'All_HH') %>%
+  ggplot(aes(x=factor(UIM,levels=rev(UIM_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[UIM = Limit\_Type]}{Average\ Premium[UIM = 100/300]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_uimbi_factor_wide %>%
+  arrange(factor(UIM, levels = UIM_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_uimbi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(UIM != 'All_HH') %>% 
+  ggplot(aes(x=factor(UIM,levels=rev(UIM_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank())
+```
+
+### <span style="color: blue;">UMPD</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+by_limit_umpd <- Limit_dat %>% 
+  filter(!is.na(UMP.x)) %>%
+  select(UMP=UMP.x,Company,Avg_veh_prem=UMP.y) %>% 
+  group_by(UMP,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem,na.rm = TRUE),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[UMP=='25'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_umpd_prem_wide <- by_limit_umpd %>% 
+  arrange(UMP,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_umpd_rel_wide <- by_limit_umpd %>% 
+  arrange(UMP,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_umpd_factor_wide <-by_limit_umpd %>% 
+  arrange(UMP,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+UMP_order <- c('5','10','15','20','25','50','100','200','300')
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(UMP.x,levels=rev(UMP_order)))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 0.5, y = 1300, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_umpd_prem_wide %>% 
+  filter(UMP != '') %>% 
+  arrange(factor(UMP,levels = UMP_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_umpd_rel_wide %>%
+  arrange(factor(UMP,levels = UMP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_umpd %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',UMP != 'All_HH') %>%
+  ggplot(aes(x=factor(UMP,levels = rev(UMP_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+
+
+```{r eval=FALSE}
+#### Factor
+
+#$$
+#Limit\ factor =\frac{Average\ Premium[UMP = Limit\_Type]}{Average\ Premium[UMP = 50]}
+#$$
+
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_umpd_factor_wide %>%
+    arrange(factor(UMP,levels = UMP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+```{r eval=FALSE}
+#### Factor-Graph
+by_limit_umpd %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(UMP != 'All_HH') %>% 
+  ggplot(aes(x=factor(UMP,levels = rev(UMP_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none', axis.title.y=element_blank())
+```
+
+### <span style="color: blue;">Vehicle Age</span>  {.tabset .tabset-fade} 
+
+The average premium, relativity & factors are calculated using BI & PD premium combined since State Farm has only BI coverage.
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_veh_age_bi <- MY_dat %>% 
+  select(Veh_Age,Company,Avg_veh_prem=`BI+PD`) %>% 
+  group_by(Veh_Age,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[Veh_Age==5],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_veh_age_bi_prem_wide <- by_veh_age_bi %>% 
+  arrange(Veh_Age,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_veh_age_bi_rel_wide <- by_veh_age_bi %>% 
+  arrange(Veh_Age,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_veh_age_bi_factor_wide <-by_veh_age_bi %>% 
+  arrange(Veh_Age,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+# BI_order <- c("15/30","25/50","30/60","50/100","100/300","250/500","300/500","500/500","500/1M","1M/1M")
+```
+
+#### Distribution
+
+```{r}
+MY_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(Veh_Age))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1.5, y = 135, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_veh_age_bi_prem_wide %>% 
+  arrange(factor(Veh_Age, levels = BI_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_veh_age_bi_rel_wide %>%   
+  arrange(factor(Veh_Age, levels = BI_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_veh_age_bi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty') %>%
+  ggplot(aes(x=Veh_Age,y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Veh\_Age\ factor =\frac{Average\ Premium[Age = Age]}{Average\ Premium[Age = 5]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_veh_age_bi_factor_wide %>%
+  arrange(factor(Veh_Age, levels = BI_order)) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_veh_age_bi %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  # filter(BI != 'All_HH') %>% 
+  ggplot(aes(x=Veh_Age,y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank())
+```
+
+###
+
+<div class = "blue">
+## Deductible/MY/Symbol
+</div>
+
+
+
+
+
+
+
+### <span style="color: blue;">Comprehensive</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_limit_comp <- Limit_dat %>% 
+  filter(CMP.x != '') %>% 
+  select(CMP=CMP.x,Company,Avg_veh_prem=CMP.y) %>% 
+  group_by(CMP,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[CMP=='500'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_comp_prem_wide <- by_limit_comp %>% 
+  arrange(CMP,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_comp_rel_wide <- by_limit_comp %>% 
+  arrange(CMP,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_comp_factor_wide <-by_limit_comp %>% 
+  arrange(CMP,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+CMP_order <- c('0','50','100','250','500','1000','2000','3000')
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>%
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(CMP.x,levels=rev(CMP_order)))) +
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 850, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_comp_prem_wide %>% 
+  filter(CMP != '') %>% 
+  arrange(factor(CMP,levels = CMP_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_comp_rel_wide %>%
+  filter(CMP != '') %>%   
+  arrange(factor(CMP,levels = CMP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_comp %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',CMP != '') %>%
+  ggplot(aes(x=factor(CMP,levels = rev(CMP_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[CMP = Limit\_Type]}{Average\ Premium[CMP = 500]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_comp_factor_wide %>%
+    arrange(factor(CMP,levels = CMP_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_comp %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(CMP != '') %>% 
+  ggplot(aes(x=factor(CMP,levels = rev(CMP_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none', axis.title.y=element_blank())
+```
+
+### <span style="color: blue;">Collision</span>  {.tabset .tabset-fade} 
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_limit_coll <- Limit_dat %>% 
+  filter(COL.x != '') %>% 
+  select(COL=COL.x,Company,Avg_veh_prem=CMP.y) %>% 
+  group_by(COL,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  # bind_rows(pcm_overall_by_veh %>% mutate(Limit='Total_avg') %>% select(BI,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[COL=='500'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)  
+
+by_coll_prem_wide <- by_limit_coll %>% 
+  arrange(COL,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_coll_rel_wide <- by_limit_coll %>% 
+  arrange(COL,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_coll_factor_wide <-by_limit_coll %>% 
+  arrange(COL,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+COL_order <- c('100','150','200','250','500','1000','2000','3000')
+```
+
+#### Distribution
+
+```{r}
+Limit_dat %>%
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(COL.x,levels=rev(COL_order)))) +
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3.5,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 1, y = 1100, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+#### Average Premium
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+# last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_coll_prem_wide %>% 
+  filter(COL != '') %>% 
+  arrange(factor(COL,levels = COL_order)) %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_coll_rel_wide %>%
+  filter(COL != '') %>%   
+  arrange(factor(COL,levels = COL_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Relativity-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_limit_coll %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',COL != '') %>%
+  ggplot(aes(x=factor(COL,levels = rev(COL_order)),y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none',axis.title.y = element_blank()) 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+#### Factor
+
+$$
+Limit\ factor =\frac{Average\ Premium[COL = Limit\_Type]}{Average\ Premium[COL = 500]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_coll_factor_wide %>%
+    arrange(factor(COL,levels = COL_order)) %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_limit_coll %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(COL != '') %>% 
+  ggplot(aes(x=factor(COL,levels = rev(COL_order)),y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none', axis.title.y=element_blank())
+```
+
+### <span style="color: blue;">Model Year/Symbol</span>  {.tabset .tabset-fade} 
+
+#### Distribution
+
+```{r}
+MY_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(factor(`Model Year`))) + 
+  geom_bar(alpha=0.25) +
+  geom_text(stat='count', aes(label=..count..),size=3,face='bold') +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 2.5, y = 125, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+    labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') +
+  theme(axis.title.y = element_blank())
+```
+
+
+
+
+###
+
+<div class = "blue">
+## Driver Composite
+</div>
+
+<span style="color: red;">To be updated</span>
+
+### <span style="color: blue;">Driver Characteristic</span>  {.tabset .tabset-fade}
+
+### <span style="color: blue;">Mature</span>  {.tabset .tabset-fade}
+
+### <span style="color: blue;">Safe Drive</span>  {.tabset .tabset-fade}
+
+### <span style="color: blue;">Driver Usage</span>  {.tabset .tabset-fade}
+
+
+###
+
+<div class = "blue">
+## Household Composite
+</div>
+
+
+```{r}
+HH_composite_dat <- Risk %>% 
+  mutate(HH=paste0(`Total Drivers`,"D",`Total Vehicles`,"V")) %>% 
+  select(`Policy No`,HH,`Max Age`,`Min Years Licensed`,`Residence Type`) %>% filter(!is.na(`Max Age`)) %>% 
+  unique() %>% 
+  left_join((dat %>%  ungroup() %>% select(Company,`Policy No`,Using_Vehicle_Prem) %>% group_by(`Policy No`,Company) %>% summarise(Avg_veh_prem=mean(Using_Vehicle_Prem))),by=c('Policy No'='Policy No')) 
+
+```
+
+```{r eval=FALSE}
+HH_composite_dat %>% head(20)
+```
+
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  bind_rows(pcm_overall_by_veh %>% mutate(HH='All_HH') %>% select(HH,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor1=round(avg_prem/avg_prem[HH=='All_HH'],2),
+         Factor2=round(avg_prem/avg_prem[HH=='2D2V'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)
+
+by_hh_prem_wide <- by_hh %>% 
+  arrange(HH,Rank) %>% 
+  select(-Rank,-Rel,-Factor1,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_hh_rel_wide <- by_hh %>% 
+  arrange(HH,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor1,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_hh_factor1_wide <- by_hh %>% 
+  arrange(HH,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor1')
+
+by_hh_factor2_wide <- by_hh %>% 
+  arrange(HH,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel,-Factor1) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor2')
+
+```
+
+
+
+### <span style="color: blue;">Household</span>  {.tabset .tabset-fade} 
+
+#### Distribution
+
+```{r}
+HH_composite_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(HH)) + 
+  geom_bar(alpha=0.5) +
+  geom_text(stat='count', aes(label=..count..),hjust=-0.2,size=3) +
+  theme_bw() +
+  coord_flip() +
+  # annotate("text", x = 23, y = 400, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue')
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') 
+```
+
+
+#### Avg Prem
+
+```{r}
+# options(digits = 0)
+# by_hh %>% head()
+# by_hh_prem_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+last_col <- names(by_hh_prem_wide)[length(names(by_hh_prem_wide))]
+
+by_hh_prem_wide %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+# %>%
+#     formatRound(columns=c('California Casualty':'American Family Insurance Company'), digits=0)
+
+```
+
+#### Relativity
+
+```{r}
+# by_hh_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_hh_rel_wide %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+#### Rel-Graph
+
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_hh %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',HH != 'All_HH') %>%
+  ggplot(aes(x=HH,y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none') 
+ 
+
+   
+# by_hh %>% filter(HH != 'ALL') %>% 
+#   ggplot(aes(x=HH,y=Factor,col=Company,shape=Company)) +
+#   geom_point() +
+#   coord_flip() +
+#   theme_bw() +  
+#   facet_wrap(~Company,ncol = 6) +
+#   theme(legend.position = 'bottom')
+
+```
+
+
+
+```{r eval=FALSE}
+#### Factor1
+
+$$
+xDyV\ factor =\frac{Average\ Premium[HH = All\_HH]}{Average\ Premium[HH = xDyV]}
+$$
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_hh_factor1_wide %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+```{r eval=FALSE}
+#### Factor1-Grp
+by_hh %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(HH != 'All_HH') %>% 
+  ggplot(aes(x=HH,y=Factor1,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+#### Factor
+
+$$
+xDyV\ factor =\frac{Average\ Premium[HH = xDyV]}{Average\ Premium[HH = 2D2V]}
+$$
+
+```{r}
+# by_hh_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_hh_factor2_wide %>%
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_hh %>% select(Co=Company,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(HH != 'All_HH') %>% 
+  ggplot(aes(x=HH,y=Factor2,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+### <span style="color: blue;">Residence Type</span>  {.tabset .tabset-fade} 
+
+#### Distribution
+
+```{r}
+HH_composite_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(`Residence Type`)) + 
+  geom_bar(alpha=0.5) +
+  geom_text(stat='count', aes(label=..count..),hjust=-0.2,size=3) +
+  theme_bw() + xlab("Residence") +
+  coord_flip() +
+  # annotate("text", x = 1, y = 400, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue')
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') 
+```
+
+#### Avg_Prem
+
+```{r}
+
+by_residence <- HH_composite_dat %>% group_by(`Residence Type`,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  bind_rows(pcm_overall_by_veh %>% mutate(`Residence Type`='All_Type') %>% select(`Residence Type`,Company,avg_prem)) %>%   
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor1=round(avg_prem/avg_prem[`Residence Type`=='All_Type'],2),
+         Factor2=round(avg_prem/avg_prem[`Residence Type`=='Other'],2)) %>%    
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)
+
+by_residence_prem_wide <- by_residence %>% 
+  arrange(`Residence Type`,Rank) %>% 
+  select(-Rank,-Rel,-Factor1,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_residence_rel_wide <- by_residence %>% 
+  arrange(`Residence Type`,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor1,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_residence_factor1_wide <- by_residence %>% 
+  arrange(`Residence Type`,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel,-Factor2) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor1')
+
+by_residence_factor2_wide <- by_residence %>% 
+  arrange(`Residence Type`,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel,-Factor1) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor2')
+
+# by_residence %>% head()
+
+
+```
+
+
+```{r}
+# by_residence_prem_wide %>% 
+#   mutate(across(is.numeric, ~ round(., 0))) %>% 
+#   kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_residence_prem_wide %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Relativity
+
+```{r}
+# by_residence_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_residence_rel_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Rel-Graph
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_residence %>% select(Co=Company,Residence=`Residence Type`,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',Residence != 'All_Type') %>%
+  ggplot(aes(x=Residence,y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+
+
+```
+
+
+
+```{r eval=FALSE}
+#### Factor1
+
+$$
+Residence.Type\_x\ factor =\frac{Average\ Premium[Residence.Type = Type\_x]}{Average\ Premium[Residence.Type = All\_Type]}
+$$
+# by_residence_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_residence_factor1_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+
+
+```{r eval=FALSE}
+#### Factor1-Grp
+by_residence %>% select(Co=Company,Residence=`Residence Type`,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(Residence != 'All_Type') %>% 
+  ggplot(aes(x=Residence,y=Factor1,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+#### Factor
+
+$$
+Residence.Type\_x\ factor =\frac{Average\ Premium[Residence.Type = Type\_x]}{Average\ Premium[Residence.Type = Other]}
+$$
+
+```{r}
+# by_residence_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_residence_factor2_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_residence %>% select(Co=Company,Residence=`Residence Type`,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(Residence != 'All_Type') %>% 
+  ggplot(aes(x=Residence,y=Factor2,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+### <span style="color: blue;">Max Age</span>  {.tabset .tabset-fade} 
+
+#### Distribution
+
+```{r}
+HH_composite_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(`Max Age`)) + 
+  geom_histogram(alpha=0.5) +
+  theme_bw() +
+  xlab('Max Age in the HH') +
+  # annotate("text", x = 50, y = 10, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue')
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') 
+```
+
+```{r}
+
+# by_hh <- HH_composite_dat %>% group_by(HH,Company) %>% 
+#   summarise(avg_prem=mean(Policy_Prem)) %>% 
+#   # ungroup() %>%
+#   mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+#   left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+#   select(-Company.y)
+
+by_max_age <- HH_composite_dat %>% 
+  mutate(Max_Age_group=case_when(`Max Age`>=80~'80+',
+                                 `Max Age`>=65~'65+',
+                                 `Max Age`>=60~'60+',
+                                 `Max Age`>=49~'49+',
+                                 `Max Age`>=46~'46+',
+                                 `Max Age`>=40~'40+',
+                                 `Max Age`>=30~'30+',
+                                 `Max Age`>=25~'25+',
+                                 `Max Age`>=22~'22+',
+                                 `Max Age`>=20~'20+',
+                                 `Max Age`>=18~'18+',
+                                 TRUE~'16+')) %>% 
+  group_by(Max_Age_group,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  bind_rows(pcm_overall_by_veh %>% mutate(Max_Age_group='All_Group') %>% select(Max_Age_group,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[Max_Age_group=='46+'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>% 
+  select(-Company.y)
+
+by_max_age_prem_wide <- by_max_age %>% 
+  arrange(Max_Age_group,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_max_age_rel_wide <- by_max_age %>% 
+  arrange(Max_Age_group,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_max_age_factor_wide <- by_max_age %>% 
+  arrange(Max_Age_group,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+
+
+```
+
+#### Average Premium
+
+```{r}
+# by_max_age_prem_wide %>% 
+#   mutate(across(is.numeric, ~ round(., 0))) %>% 
+#   kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_max_age_prem_wide %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Relativity
+
+```{r}
+# by_max_age_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_max_age_rel_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Relativity-Graph
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_max_age %>% select(Co=Company,Max_Age_group,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',Max_Age_group != 'All_Group') %>%
+  ggplot(aes(x=Max_Age_group,y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+
+
+```
+
+#### Factor
+
+$$
+MaxAge\_grp\_x \ factor =\frac{Average\ Premium[Max\_Age\_group = x+]}{Average\ Premium[Max\_Age\_group = 46+]}
+$$
+
+```{r}
+# by_max_age_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_max_age_factor_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Factor-Graph
+
+```{r}
+by_max_age %>% select(Co=Company,Max_Age_group,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(Max_Age_group != 'All_Group') %>% 
+  ggplot(aes(x=Max_Age_group,y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+### <span style="color: blue;">Min Years Licensed</span>  {.tabset .tabset-fade} 
+
+#### Distribution
+
+```{r}
+HH_composite_dat %>% 
+  filter(Company == 'California Casualty') %>% 
+  ggplot(aes(`Min Years Licensed`)) + 
+  geom_histogram(alpha=0.5) +
+  theme_bw() +
+  xlab('Min Years Licensed in the HH') +
+  # annotate("text", x = 30, y = 10, label = paste("Num of Veh:",dim(cc_prem)[1]), color='blue')
+  labs(caption = paste("Num of Veh:",dim(cc_prem)[1]), color='blue') 
+```
+
+```{r}
+
+by_min_years <- HH_composite_dat %>% 
+  mutate(`Min Yrs-Licensed group`=case_when(`Min Years Licensed`>60~'60+',
+                                 `Min Years Licensed`>=50~'50+',
+                                 `Min Years Licensed`>=40~'40+',
+                                 `Min Years Licensed`>=33~'33+',
+                                 `Min Years Licensed`>=30~'30+',
+                                 `Min Years Licensed`>=20~'20+',
+                                 `Min Years Licensed`>=10~'10+',
+                                 `Min Years Licensed`>=5~'05+',
+                                 `Min Years Licensed`>=4~'04+',
+                                 `Min Years Licensed`>=3~'03+',
+                                 `Min Years Licensed`>=2~'02+',
+                                 `Min Years Licensed`>=1~'01+',
+                                 TRUE~'0')) %>% 
+  group_by(`Min Yrs-Licensed group`,Company) %>% 
+  summarise(avg_prem=mean(Avg_veh_prem),Num_of_Veh=n()) %>% 
+  bind_rows(pcm_overall_by_veh %>% mutate(`Min Yrs-Licensed group`='All_Group') %>% select(`Min Yrs-Licensed group`,Company,avg_prem)) %>% 
+  # ungroup() %>%
+  mutate(Rel=round(avg_prem/avg_prem[Company=='California Casualty']*100,1)) %>% 
+  group_by(Company) %>% 
+  mutate(Factor=round(avg_prem/avg_prem[`Min Yrs-Licensed group`=='30+'],2)) %>%  
+  left_join((st_mkt_share %>% select(Company,`Company Name`,`Rank`)),by=c("Company"="Company Name")) %>%
+  select(-Company.y)
+
+by_min_year_prem_wide <- by_min_years %>% 
+  arrange(`Min Yrs-Licensed group`,Rank) %>% 
+  select(-Rank,-Rel,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='avg_prem')
+
+by_min_year_rel_wide <- by_min_years %>% 
+  arrange(`Min Yrs-Licensed group`,Rank) %>% 
+  select(-Rank,-avg_prem,-Factor) %>% 
+  pivot_wider(names_from = 'Company',values_from='Rel')
+
+by_min_year_factor_wide <- by_min_years %>% 
+  arrange(`Min Yrs-Licensed group`,Rank) %>% 
+  select(-Rank,-avg_prem,-Rel) %>% 
+  pivot_wider(names_from = 'Company',values_from='Factor')
+
+
+
+```
+
+#### Average Premium
+
+```{r}
+# by_min_year_prem_wide %>% 
+#   mutate(across(is.numeric, ~ round(., 0))) %>% 
+#   kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_min_year_prem_wide %>% 
+  mutate(across(is.numeric, ~ round(., 0))) %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Relativity
+
+```{r}
+# by_min_year_rel_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_min_year_rel_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE) 
+```
+
+#### Relativity-Graph
+
+```{r}
+# chart_levels <- st_mkt_share %>% arrange(Rank) %>% select(Company) %>% unique() %>% list()
+
+by_min_years %>% select(Co=Company,`Min Yrs-Licensed group`,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+# temp$Company <- factor(temp$Co1,leve)
+  # mutate(Company=factor(Company,levels = chart_levels)) %>%
+  filter(Co != 'California Casualty',`Min Yrs-Licensed group` != 'All_Group') %>%
+  ggplot(aes(x=`Min Yrs-Licensed group`,y=Rel,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+
+
+```
+
+#### Factor
+
+$$
+MinYear\_grp\_x \ factor =\frac{Average\ Premium[Min\_Year\_group = x+]}{Average\ Premium[Min\_Year\_group = 30+]}
+$$
+
+```{r}
+# by_min_year_factor_wide %>% kable(format = "html", escape = F) %>%
+#   kable_styling("striped", full_width = F) %>%
+#   scroll_box(width = "100%", height = "500px")
+
+by_min_year_factor_wide %>% 
+  datatable(options = list(lengthMenu = c(10, 20, 30), pageLength = 10),class = 'cell-border stripe', filter = 'top',rownames = FALSE)
+```
+
+#### Factor-Graph
+
+```{r}
+by_min_years %>% select(Co=Company,`Min Yrs-Licensed group`,everything()) %>% 
+  left_join((st_mkt_share %>% select(Company,`Company Name`)),by=c("Co"="Company Name")) %>% 
+  filter(`Min Yrs-Licensed group` != 'All_Group') %>% 
+  ggplot(aes(x=`Min Yrs-Licensed group`,y=Factor,col=Company,shape=Company)) +
+  geom_point() +
+  # geom_smooth(se = FALSE, method = "lm") +
+  coord_flip() +
+      theme_bw() +
+    facet_wrap(~Company,ncol = 6) +
+  theme(legend.position = 'none')
+```
+
+
+###
+
+<div class = "blue">
+## Other rating components
+</div>
+
+<span style="color: red;">To be updated</span>
+
+# About Model
+
+```{r}
+# Model_assumption_pol <- read_xlsb('I:/0.NEW/AUTO_Models/PCM_use_inforce/Model_Assumptions.xlsb', sheet = 'Mapping_Policy')
+# Model_assumption_veh <- read_xlsb('I:/0.NEW/AUTO_Models/PCM_use_inforce/Model_Assumptions.xlsb', sheet = 'Mapping_Vehicle')
+# Model_assumption_dri <- read_xlsb('I:/0.NEW/AUTO_Models/PCM_use_inforce/Model_Assumptions.xlsb', sheet = 'Mapping_Driver')
+Model_assumption <- read_excel("I:/0.NEW/AUTO_Models/Market_Share.xlsx",sheet='Model_Assumptions',range = "A1:C33")
+
+```
+
+### <span style="color: blue;">Model Assumptions</span>  {.tabset .tabset-fade} 
+
+#### Summary
+
+To build the rating model, we use data extracted from our historical database (HDB). The vehicles in the model are the in-force private passenger type vehicles with full or liability-only coverage. The data inputs for majority of the rating components are kept exactly the same as the rating inputs of the in-force vehicles. We, however, modified input for some rating elements to make them fit to our New Business rating model. The assumptions and modifications are listed in the table on the next Tab.
+
+
+**A detailed mapping of CCG-IQ rating variables is available in the Excel workbook.**
+
+<p style="color:green">To open file from the folder</p>go to: T:/ACT_PID/Pcm_brm/Auto/New_Model/z.IQ_CC_Mapping/z.For Hong/z.MASTER_Data_Dictionary_CC_Rater_Mapping_V01.xlsb
+
+<p style="color:green">To open a copy</p>[click here](T:/ACT_PID/Pcm_brm/Auto/New_Model/z.IQ_CC_Mapping/z.For Hong/z.MASTER_Data_Dictionary_CC_Rater_Mapping_V01.xlsb)
+
+#### Mapping table
+
+**Note:** Term “book data”, means the input values are the same as those extracted from HDB.
+
+```{r}
+Model_assumption %>% 
+  kable(format = "html", escape = F) %>%
+  kable_styling("striped", full_width = F)  %>%
+  scroll_box(width = "100%", height = "500px")
+
+```
+
+
+
+### <span style="color: blue;">Discounts/Surcharges NOT applied </span>  {.tabset .tabset-fade} 
+
+#### UBI
+
+UBI has been part of the insurance rating plans of many competitors for about 10 years now. However, how competitors assign the risk score for participants are mostly confidential. Many competitors give a flat 5%/10% discount on the first term to encourage drivers to participate in the program. At the end of term, if the risk scores cause the premiums to go up, the driver can opt out. This is a win-win option for early adopters (they can only gain from trying). 2 studies on this topic were done in 2013 and 2014 however we didn’t apply it in the current PCM model due to lack of data. It's important for us to get some supporting data on the proportion of drivers who are participating in the trial as well as are enrolling in the program. If we set a high proportion (than actual) of the drivers participating in either program, we risk putting CC at the un-competitive level in the market.
+
+#### Vehicle History
+
+2 companies that have Vehicle History in their rating plans are Progressive and Farmers.
+
+- Progressive: classifies vehicle history by title, theft and damage history incidents, and age of a vehicle history incident, etc.
+- Farmers: this rating element was introduced in KS effective 5/22/21. However, it’s not applied to OR. It was applied in AZ until effective 12/15/2020 the surcharge factors were changed to 1 and the rule was removed. When applied, it's a 15% surcharge to the vehicle if "vehicle, prior to being insured with the Farmers Group of Companies, has sustained structural or other severe damage (other than damage caused by flood/water/fire or certain other unacceptable structural damage)."
+- CCG: the vehicle history scores from our HDB (when available) do not tell us the exact vehicle issues. Upon checking with Wen, there was a request that the damaging details be stored in DataHub and PC and later be transferred to HDB.
+
+#### Advanced Quote Discount
+
+This is also called “Early Bird Discount” by a few companies. Top competitors will give a discount if the shopper quotes and binds at least 7 days before the policy effective date. Exception:
+
+- State Farm: does not offer this discount.
+- Geico: does not have this as a stand-alone discount. However, IQ uses the number of Advance Shopper (Days) in Geico Tier determination, where the Advance Shopper (Days) has to be > 1 and no lapse to be considered "current insurance". This "rule" is not stated anywhere in the manuals we looked at but was told this is how Geico does – the information is from IQ’s confidential source.
+- Progressive: the minimum advanced day to get the discount is just 1 day. Due to the 1 day minimum requirement for Geico, we set 1 of advance shopper day in the model and thus triggers the discount for Progressive. 
+
+#### Insurances other than Homeowner Insurance
+
+Competitors also give discounts when the named insured is also the named insured or owner of other policies like: Health, Life, Personal Liability Umbrella, Boat, Misc. Vehicles with the same or affiliated companies. We can find the distribution of policies, from our book, that have both PP and Misc. Vehicles but we don’t have data for the other types of Insurance.
+
+####	Advanced Training
+
+Of the 7 states we have looked at, State Farm, Allstate, American Family and Farm Bureau (in KS) give discounts to youthful drivers if they participate in the company’s special training/driving programs. These programs are different from the Driving Training courses organized by state. SF’s Steer Clear discount, AS’s teenSMART, FB’s Safe Young Driver discount is applied to under-25 year-of-age drivers while AF’s Teen Safe Driver to drivers under 21 years of age only. Youthful drivers account for a small portion of our book and including these features in the model probably has a very small impact on the Relativity and might not produce meaningful statistics for the pricing team to use. 
+
+#### Initial Quote Method
+
+We select “Agent’ as the method in the model. However, competitors 1. have separate rating plans for clients who get quotes with Agent versus getting quotes online (e.g. Progressive), 2. put the insured in different Tiers based on the quoting method (e.g. Geico), or 3. have the Online Quote discount as a step in the rating algorithm (Progressive). Online quoting has become popular nowadays and we may be able to find some data showing the proportion of online shoppers. 
+
+###
+
+# Misc
+
+```{r}
+info_tbl %>% 
+    kable(format = "html", escape = F) %>%
+  kable_styling("striped", full_width = F)
+```
+
+
+
