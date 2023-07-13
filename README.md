@@ -1,5 +1,8 @@
 # Goal
-This program is to:
-- Combine the carriers' rating premium data from the third-party software and our internally rated premiums (company current rate), for thousands of hypothetical risks in our Pricing Competitive model. provide numerous statistics.
-- Generate overall Relativity and other summarised data to Excel workbook for team members to use during quarter Rate Review
-- Generate Factor Relativity for major Rating variables and out graphs & results to an html file.
+This program serves the following purposes:
+- Combining the rating premium data from carriers obtained through the third-party software with our internally rated premiums (company current rate) for thousands of hypothetical risks in our Pricing Competitive model.
+- Generating overall Relativity and other summarized data to an Excel workbook. This data is intended for use by team members during the quarter's Rate Review process.
+- Generating Factor Relativity for major Rating variables.
+- Outputting graphs and statistical summary results to an HTML file.
+
+Overall, the program facilitates the consolidation and analysis of rating premium data, allowing team members to review and analyze key factors during the Rate Review process. Additionally, it provides visual representations and statistical summaries for further analysis and presentation purposes.
